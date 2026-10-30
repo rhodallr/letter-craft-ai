@@ -6,7 +6,7 @@ Built with Next.js 15 (App Router), Tailwind CSS, Lucide icons, pdfjs-dist (CV r
 
 ## Run it locally
 
-1. Install Node.js 18.18 or newer.
+1. Install Node.js 22.
 2. In this folder:
    ```bash
    npm install
@@ -22,6 +22,7 @@ Built with Next.js 15 (App Router), Tailwind CSS, Lucide icons, pdfjs-dist (CV r
 ## Deploy to Vercel
 
 1. Push this folder to a GitHub repository (the `.gitignore` keeps `node_modules`, `.next` and `.env.local` out).
+   If you use GitHub's web uploader, drag the whole project folder's contents in at once, including the `app`, `components` and `lib` folders. Selecting individual files flattens them into the root and the build fails with "Couldn't find any `pages` or `app` directory".
 2. In Vercel, choose **Add New → Project** and import the repo. The framework is detected automatically.
 3. Under **Environment Variables**, add `GEMINI_API_KEY` (and `GROQ_API_KEY` if you have one).
 4. Deploy. If you add or change a key later, redeploy for it to take effect.
