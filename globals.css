@@ -1,0 +1,136 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+@layer base {
+  html {
+    -webkit-text-size-adjust: 100%;
+  }
+  body {
+    @apply bg-envelope text-ink font-sans antialiased;
+    font-feature-settings: 'ss01' on;
+  }
+  ::selection {
+    background: #ffe35a;
+    color: #10145c;
+  }
+  :focus-visible {
+    outline: 3px solid #2a33e8;
+    outline-offset: 2px;
+  }
+}
+
+@layer components {
+  /* The airmail stripe: the one decorative device, borrowed from envelopes. */
+  .airmail {
+    height: 8px;
+    background: repeating-linear-gradient(
+      -45deg,
+      #ff4a2e 0 14px,
+      #ffffff 14px 22px,
+      #2a33e8 22px 36px,
+      #ffffff 36px 44px
+    );
+  }
+
+  .panel {
+    @apply rounded-xl border-2 border-ink bg-white shadow-hard;
+  }
+
+  .btn {
+    @apply inline-flex items-center justify-center gap-2 rounded-lg border-2 border-ink px-4 py-2.5 text-[15px] font-semibold leading-none transition-[transform,box-shadow] duration-100 disabled:cursor-not-allowed disabled:opacity-50;
+  }
+  .btn:not(:disabled):active {
+    transform: translate(2px, 2px);
+    box-shadow: 0 0 0 0 #10145c;
+  }
+  .btn-primary {
+    @apply btn bg-stamp text-ink shadow-hard hover:bg-[#ff6247];
+  }
+  .btn-blue {
+    @apply btn bg-royal text-white shadow-hard hover:bg-[#3d46f2];
+  }
+  .btn-plain {
+    @apply btn bg-white text-ink shadow-hard-sm hover:bg-envelope;
+  }
+  .btn-ghost {
+    @apply inline-flex items-center gap-1.5 rounded-md px-2 py-1.5 text-sm font-semibold text-ink/80 hover:bg-ink/5 hover:text-ink disabled:opacity-40;
+  }
+
+  .field {
+    @apply w-full rounded-lg border-2 border-ink bg-white px-3.5 py-3 text-[15px] leading-relaxed text-ink placeholder:text-ink/45 focus:outline-none focus-visible:outline-none focus:ring-4 focus:ring-royal/30;
+  }
+
+  .chip {
+    @apply inline-flex items-center gap-1.5 rounded-full border-2 border-ink bg-white px-3 py-1.5 text-sm font-semibold text-ink hover:bg-marker disabled:opacity-50 disabled:hover:bg-white;
+  }
+}
+
+/* ---------- Letter sheet (mirrors lib/pdfExporter.js) ----------
+   Every measurement is in PDF points scaled to the sheet width,
+   so the preview wraps lines the way the downloaded PDF does. */
+.sheet-frame {
+  container-type: inline-size;
+}
+.sheet {
+  --pt: calc(100cqw / 595.28);
+  min-height: calc(var(--pt) * 841.89);
+  color: #1c1c1f;
+  overflow-wrap: break-word;
+}
+.sheet [contenteditable] {
+  outline: none;
+  border-radius: 2px;
+  transition: background-color 120ms;
+}
+.sheet [contenteditable]:hover {
+  background: rgba(42, 51, 232, 0.06);
+}
+.sheet [contenteditable]:focus {
+  background: rgba(255, 227, 90, 0.45);
+  box-shadow: 0 0 0 2px rgba(255, 227, 90, 0.45);
+}
+.sheet [contenteditable]:empty::before {
+  content: attr(data-placeholder);
+  color: #9a9aa5;
+}
+
+/* The single orchestrated moment: a new draft writes itself onto the page. */
+@keyframes ink-in {
+  from {
+    opacity: 0;
+    clip-path: inset(0 100% 0 0);
+  }
+  to {
+    opacity: 1;
+    clip-path: inset(0 0 0 0);
+  }
+}
+.ink-in {
+  animation: ink-in 520ms cubic-bezier(0.2, 0.7, 0.2, 1) both;
+  animation-delay: calc(var(--i, 0) * 110ms);
+}
+
+@keyframes writing {
+  0%,
+  100% {
+    opacity: 0.35;
+  }
+  50% {
+    opacity: 0.8;
+  }
+}
+.writing-line {
+  animation: writing 1.4s ease-in-out infinite;
+  animation-delay: calc(var(--i, 0) * 90ms);
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .ink-in,
+  .writing-line {
+    animation: none;
+  }
+  .btn {
+    transition: none;
+  }
+}
