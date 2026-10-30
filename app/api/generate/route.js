@@ -15,7 +15,22 @@ const LIMITS = {
 
 const GEMINI_MODEL = process.env.GEMINI_MODEL || 'gemini-3.8-flash';
 const GROQ_MODEL = process.env.GROQ_MODEL || 'llama-3.3-70b-versatile';
-const TIMEOUT_MS = 50_000;
+// Vercel stops the function at maxDuration (60s), so every AI call shares one
+// deadline a little under that and gives up cleanly instead of being killed.
+const DEADLINE_MS = 56_000;
+const MIN_CALL_MS = 8_000;
+
+// Gemini 3.x models "think" before answering; the default level (medium) can
+// push a full CV + job description past the time limit. Low is Google's
+// recommended setting for latency and is plenty for a cover letter.
+const GEMINI_THINKING_LEVEL = process.env.GEMINI_THINKING_LEVEL || 'low';
+
+function geminiThinkingConfig(model) {
+  const major = Number(model.match(/^gemini-(\d+)/)?.[1] || 0);
+  if (major >= 3) return { thinkingLevel: GEMINI_THINKING_LEVEL };
+  if (/^gemini-2\.5-flash/.test(model)) return { thinkingBudget: 0 };
+  return null; // Older or unknown models: leave the default.
+}
 
 const BANNED_PHRASES = [
   'I am writing to express my interest',
@@ -143,21 +158,40 @@ class ProviderError extends Error {
   }
 }
 
-async function callGemini({ system, prompt, temperature }) {
+async function callGemini({ system, prompt, temperature, timeoutMs }) {
   const url = `https://generativelanguage.googleapis.com/v1beta/models/${encodeURIComponent(GEMINI_MODEL)}:generateContent`;
-  const res = await fetch(url, {
-    method: 'POST',
-    headers: {
-      'Content-Type': 'application/json',
-      'x-goog-api-key': process.env.GEMINI_API_KEY,
-    },
-    body: JSON.stringify({
-      systemInstruction: { parts: [{ text: system }] },
-      contents: [{ role: 'user', parts: [{ text: prompt }] }],
-      generationConfig: { temperature, maxOutputTokens: 8192 },
-    }),
-    signal: AbortSignal.timeout(TIMEOUT_MS),
-  });
+  const send = (thinkingConfig) =>
+    fetch(url, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        'x-goog-api-key': process.env.GEMINI_API_KEY,
+      },
+      body: JSON.stringify({
+        systemInstruction: { parts: [{ text: system }] },
+        contents: [{ role: 'user', parts: [{ text: prompt }] }],
+        generationConfig: {
+          temperature,
+          maxOutputTokens: 8192,
+          ...(thinkingConfig ? { thinkingConfig } : {}),
+        },
+      }),
+      signal: AbortSignal.timeout(timeoutMs),
+    });
+
+  const thinkingConfig = geminiThinkingConfig(GEMINI_MODEL);
+  let res = await send(thinkingConfig);
+
+  // If a model rejects the thinking setting, ask again without it.
+  if (res.status === 400 && thinkingConfig) {
+    const detail = await res.text().catch(() => '');
+    if (/thinking/i.test(detail)) {
+      console.warn(`[generate] ${GEMINI_MODEL} rejected thinkingConfig; retrying without it`);
+      res = await send(null);
+    } else {
+      res = new Response(detail, { status: 400 });
+    }
+  }
 
   if (!res.ok) {
     const detail = await res.text().catch(() => '');
@@ -178,7 +212,7 @@ async function callGemini({ system, prompt, temperature }) {
   return text;
 }
 
-async function callGroq({ system, prompt, temperature }) {
+async function callGroq({ system, prompt, temperature, timeoutMs }) {
   const res = await fetch('https://api.groq.com/openai/v1/chat/completions', {
     method: 'POST',
     headers: {
@@ -195,7 +229,7 @@ async function callGroq({ system, prompt, temperature }) {
         { role: 'user', content: prompt },
       ],
     }),
-    signal: AbortSignal.timeout(TIMEOUT_MS),
+    signal: AbortSignal.timeout(timeoutMs),
   });
 
   if (!res.ok) {
@@ -309,21 +343,33 @@ export async function POST(request) {
     prompt = buildGeneratePrompt({ cvText, notes, jobText });
   }
 
+  const startedAt = Date.now();
   let lastError = null;
-  for (const provider of available) {
+  for (const [providerIndex, provider] of available.entries()) {
     // Two attempts per provider: the second runs cooler if the JSON was malformed.
     for (let attempt = 0; attempt < 2; attempt++) {
+      const remaining = DEADLINE_MS - (Date.now() - startedAt);
+      if (remaining < MIN_CALL_MS) break;
+      // Leave room for a fallback provider if there is one.
+      const hasFallback = providerIndex < available.length - 1;
+      const timeoutMs = hasFallback && attempt === 0 ? Math.min(remaining - 12_000, 42_000) : remaining;
+      const callStart = Date.now();
       try {
         const text = await provider.call({
           system: SYSTEM_PROMPT,
           prompt,
           temperature: attempt === 0 ? 0.7 : 0.4,
+          timeoutMs: Math.max(timeoutMs, MIN_CALL_MS),
         });
         const result = normaliseResult(extractJson(text));
+        console.log(`[generate] ${mode} via ${provider.name} (${provider.model}) in ${Date.now() - callStart}ms`);
         return NextResponse.json({ ...result, provider: provider.name, model: provider.model });
       } catch (err) {
         lastError = err;
-        console.error(`[generate] ${provider.name} attempt ${attempt + 1} failed:`, err.message);
+        console.error(
+          `[generate] ${provider.name} attempt ${attempt + 1} failed after ${Date.now() - callStart}ms:`,
+          err.name === 'TimeoutError' ? 'timed out' : err.message
+        );
         if (err instanceof ProviderError) {
           // Auth or bad-request errors won't fix themselves; move to the next provider.
           if (!err.retryable || err.status === 429) break;

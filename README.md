@@ -33,6 +33,7 @@ Built with Next.js 15 (App Router), Tailwind CSS, Lucide icons, pdfjs-dist (CV r
 | --- | --- | --- |
 | `GEMINI_API_KEY` | One of the two keys | none |
 | `GEMINI_MODEL` | No | `gemini-3.8-flash` |
+| `GEMINI_THINKING_LEVEL` | No | `low` (fastest; `medium` and `high` are slower and can hit the 60-second limit) |
 | `GROQ_API_KEY` | One of the two keys | none |
 | `GROQ_MODEL` | No | `llama-3.3-70b-versatile` |
 
