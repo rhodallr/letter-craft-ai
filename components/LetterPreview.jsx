@@ -200,6 +200,18 @@ function Message({ message, onRetry, busy }) {
           <AlertCircle size={18} className="mt-0.5 shrink-0 text-stamp" aria-hidden />
           {message.text}
         </p>
+        {message.details?.length > 0 && (
+          <details className="mt-2 text-sm">
+            <summary className="cursor-pointer font-semibold text-ink/80">Technical details</summary>
+            <ul className="mt-1.5 space-y-1 break-words text-ink/75">
+              {message.details.map((d, i) => (
+                <li key={i} className="border-l-4 border-stamp/60 pl-2 leading-snug">
+                  {d}
+                </li>
+              ))}
+            </ul>
+          </details>
+        )}
         {onRetry && (
           <button type="button" className="btn-plain mt-3 py-2 text-sm" onClick={onRetry} disabled={!!busy}>
             <RotateCcw size={15} aria-hidden />

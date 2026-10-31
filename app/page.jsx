@@ -122,7 +122,11 @@ export default function Home() {
       body: JSON.stringify(payload),
     });
     const data = await res.json().catch(() => ({}));
-    if (!res.ok) throw new Error(data.error || 'Something went wrong. Try again.');
+    if (!res.ok) {
+      const error = new Error(data.error || 'Something went wrong. Try again.');
+      error.details = Array.isArray(data.details) ? data.details : [];
+      throw error;
+    }
     return data;
   }
 
@@ -157,7 +161,7 @@ export default function Home() {
         }),
       ]);
     } catch (err) {
-      setMessages((prev) => [...prev, msg('error', err.message)]);
+      setMessages((prev) => [...prev, msg('error', err.message, { details: err.details })]);
     } finally {
       setBusy(null);
     }
@@ -175,7 +179,7 @@ export default function Home() {
       pushVersion({ ...data.letter, date: date || today() });
       setMessages((prev) => [...prev, msg('assistant', data.changes || 'Done. The page shows the new version.')]);
     } catch (err) {
-      setMessages((prev) => [...prev, msg('error', err.message)]);
+      setMessages((prev) => [...prev, msg('error', err.message, { details: err.details })]);
     } finally {
       setBusy(null);
     }

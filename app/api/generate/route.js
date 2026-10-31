@@ -103,6 +103,18 @@ function cleanString(value, max) {
   return typeof value === 'string' ? value.replace(/\u0000/g, '').trim().slice(0, max) : '';
 }
 
+// Whitespace from PDFs and web pages wastes tokens; free tiers limit tokens per minute.
+const PROMPT_CAPS = { cvText: 14_000, jobText: 9_000 };
+
+function compact(text, max) {
+  const tidy = text
+    .replace(/[ \t\u00a0]+/g, ' ')
+    .replace(/ *\n */g, '\n')
+    .replace(/\n{3,}/g, '\n\n')
+    .trim();
+  return tidy.length > max ? `${tidy.slice(0, max)}\n[…trimmed]` : tidy;
+}
+
 function buildGeneratePrompt({ cvText, notes, jobText }) {
   return `<cv>
 ${cvText}
@@ -150,16 +162,35 @@ Revise the current letter to carry out the request. Keep everything that already
 
 /* ------------------------------- Providers ------------------------------- */
 
+// Tried in order if the one before isn't available to this key or is out of quota.
+const GEMINI_FALLBACK_MODELS = ['gemini-3.6-flash', 'gemini-3.1-flash-lite'];
+// Lighter Groq model with higher free limits, used if the main one rejects the request.
+const GROQ_FALLBACK_MODELS = ['llama-3.1-8b-instant'];
+
 class ProviderError extends Error {
-  constructor(message, status, retryable) {
+  constructor(message, status, retryable, reason = '') {
     super(message);
     this.status = status;
     this.retryable = retryable;
+    this.reason = reason;
   }
 }
 
-async function callGemini({ system, prompt, temperature, timeoutMs }) {
-  const url = `https://generativelanguage.googleapis.com/v1beta/models/${encodeURIComponent(GEMINI_MODEL)}:generateContent`;
+/** Pulls the human-readable message out of a provider error body. */
+function errorReason(status, detail) {
+  let message = '';
+  try {
+    const data = JSON.parse(detail);
+    message = data?.error?.message || data?.message || '';
+  } catch {
+    message = detail;
+  }
+  message = String(message).replace(/\s+/g, ' ').trim().slice(0, 220);
+  return `${status}${message ? ` ${message}` : ''}`;
+}
+
+async function callGemini({ model, system, prompt, temperature, timeoutMs }) {
+  const url = `https://generativelanguage.googleapis.com/v1beta/models/${encodeURIComponent(model)}:generateContent`;
   const send = (thinkingConfig) =>
     fetch(url, {
       method: 'POST',
@@ -179,14 +210,14 @@ async function callGemini({ system, prompt, temperature, timeoutMs }) {
       signal: AbortSignal.timeout(timeoutMs),
     });
 
-  const thinkingConfig = geminiThinkingConfig(GEMINI_MODEL);
+  const thinkingConfig = geminiThinkingConfig(model);
   let res = await send(thinkingConfig);
 
   // If a model rejects the thinking setting, ask again without it.
   if (res.status === 400 && thinkingConfig) {
     const detail = await res.text().catch(() => '');
     if (/thinking/i.test(detail)) {
-      console.warn(`[generate] ${GEMINI_MODEL} rejected thinkingConfig; retrying without it`);
+      console.warn(`[generate] ${model} rejected thinkingConfig; retrying without it`);
       res = await send(null);
     } else {
       res = new Response(detail, { status: 400 });
@@ -195,8 +226,13 @@ async function callGemini({ system, prompt, temperature, timeoutMs }) {
 
   if (!res.ok) {
     const detail = await res.text().catch(() => '');
-    console.error(`[generate] Gemini ${res.status}: ${detail.slice(0, 500)}`);
-    throw new ProviderError(`Gemini returned ${res.status}`, res.status, res.status === 429 || res.status >= 500);
+    console.error(`[generate] Gemini ${model} ${res.status}: ${detail.slice(0, 800)}`);
+    throw new ProviderError(
+      `Gemini returned ${res.status}`,
+      res.status,
+      res.status === 429 || res.status >= 500,
+      errorReason(res.status, detail)
+    );
   }
 
   const data = await res.json();
@@ -206,13 +242,13 @@ async function callGemini({ system, prompt, temperature, timeoutMs }) {
     .map((p) => p.text)
     .join('');
   if (!text) {
-    const reason = candidate?.finishReason || data?.promptFeedback?.blockReason || 'empty response';
-    throw new ProviderError(`Gemini returned no text (${reason})`, 502, true);
+    const why = candidate?.finishReason || data?.promptFeedback?.blockReason || 'empty response';
+    throw new ProviderError(`Gemini returned no text (${why})`, 502, true, `no text returned (${why})`);
   }
   return text;
 }
 
-async function callGroq({ system, prompt, temperature, timeoutMs }) {
+async function callGroq({ model, system, prompt, temperature, timeoutMs }) {
   const res = await fetch('https://api.groq.com/openai/v1/chat/completions', {
     method: 'POST',
     headers: {
@@ -220,9 +256,9 @@ async function callGroq({ system, prompt, temperature, timeoutMs }) {
       Authorization: `Bearer ${process.env.GROQ_API_KEY}`,
     },
     body: JSON.stringify({
-      model: GROQ_MODEL,
+      model,
       temperature,
-      max_tokens: 2048,
+      max_tokens: 1600,
       response_format: { type: 'json_object' },
       messages: [
         { role: 'system', content: system },
@@ -234,19 +270,35 @@ async function callGroq({ system, prompt, temperature, timeoutMs }) {
 
   if (!res.ok) {
     const detail = await res.text().catch(() => '');
-    console.error(`[generate] Groq ${res.status}: ${detail.slice(0, 500)}`);
-    throw new ProviderError(`Groq returned ${res.status}`, res.status, res.status === 429 || res.status >= 500);
+    console.error(`[generate] Groq ${model} ${res.status}: ${detail.slice(0, 800)}`);
+    // json_validate_failed means the model's JSON was malformed: worth one more try.
+    const badJson = res.status === 400 && /json_validate_failed|valid json/i.test(detail);
+    throw new ProviderError(
+      `Groq returned ${res.status}`,
+      res.status,
+      badJson || res.status === 429 || res.status >= 500,
+      errorReason(res.status, detail)
+    );
   }
   const data = await res.json();
   const text = data?.choices?.[0]?.message?.content;
-  if (!text) throw new ProviderError('Groq returned no text', 502, true);
+  if (!text) throw new ProviderError('Groq returned no text', 502, true, 'no text returned');
   return text;
 }
 
 function providers() {
   const list = [];
-  if (process.env.GEMINI_API_KEY) list.push({ name: 'gemini', model: GEMINI_MODEL, call: callGemini });
-  if (process.env.GROQ_API_KEY) list.push({ name: 'groq', model: GROQ_MODEL, call: callGroq });
+  const unique = (models) => [...new Set(models.filter(Boolean))];
+  if (process.env.GEMINI_API_KEY) {
+    for (const model of unique([GEMINI_MODEL, ...GEMINI_FALLBACK_MODELS])) {
+      list.push({ name: 'gemini', label: 'Gemini', model, call: callGemini });
+    }
+  }
+  if (process.env.GROQ_API_KEY) {
+    for (const model of unique([GROQ_MODEL, ...GROQ_FALLBACK_MODELS])) {
+      list.push({ name: 'groq', label: 'Groq', model, call: callGroq });
+    }
+  }
   return list;
 }
 
@@ -338,55 +390,91 @@ export async function POST(request) {
       .map((h) => cleanString(h, LIMITS.instruction))
       .filter(Boolean)
       .slice(-LIMITS.history);
-    prompt = buildRefinePrompt({ cvText, notes, jobText, letter: current, instruction, history });
+    prompt = buildRefinePrompt({
+      cvText: compact(cvText, PROMPT_CAPS.cvText),
+      notes,
+      jobText: compact(jobText, PROMPT_CAPS.jobText),
+      letter: current,
+      instruction,
+      history,
+    });
   } else {
-    prompt = buildGeneratePrompt({ cvText, notes, jobText });
+    prompt = buildGeneratePrompt({
+      cvText: compact(cvText, PROMPT_CAPS.cvText),
+      notes,
+      jobText: compact(jobText, PROMPT_CAPS.jobText),
+    });
   }
 
   const startedAt = Date.now();
-  let lastError = null;
-  for (const [providerIndex, provider] of available.entries()) {
-    // Two attempts per provider: the second runs cooler if the JSON was malformed.
+  const failures = []; // { provider, model, kind, detail }
+  const skipProvider = new Set(); // providers that timed out or rejected the key
+
+  for (const [index, entry] of available.entries()) {
+    if (skipProvider.has(entry.name)) continue;
+    const laterProvider = available.slice(index + 1).some((e) => e.name !== entry.name && !skipProvider.has(e.name));
+
+    // Two attempts per model: the second runs cooler if the JSON was malformed.
     for (let attempt = 0; attempt < 2; attempt++) {
       const remaining = DEADLINE_MS - (Date.now() - startedAt);
       if (remaining < MIN_CALL_MS) break;
-      // Leave room for a fallback provider if there is one.
-      const hasFallback = providerIndex < available.length - 1;
-      const timeoutMs = hasFallback && attempt === 0 ? Math.min(remaining - 12_000, 42_000) : remaining;
+      // Keep time back for the other provider if one is configured.
+      const timeoutMs = laterProvider ? Math.min(remaining - 14_000, 40_000) : remaining;
+      if (timeoutMs < MIN_CALL_MS) break;
+
       const callStart = Date.now();
       try {
-        const text = await provider.call({
+        const text = await entry.call({
+          model: entry.model,
           system: SYSTEM_PROMPT,
           prompt,
           temperature: attempt === 0 ? 0.7 : 0.4,
-          timeoutMs: Math.max(timeoutMs, MIN_CALL_MS),
+          timeoutMs,
         });
         const result = normaliseResult(extractJson(text));
-        console.log(`[generate] ${mode} via ${provider.name} (${provider.model}) in ${Date.now() - callStart}ms`);
-        return NextResponse.json({ ...result, provider: provider.name, model: provider.model });
+        console.log(`[generate] ${mode} via ${entry.name} (${entry.model}) in ${Date.now() - callStart}ms`);
+        return NextResponse.json({ ...result, provider: entry.name, model: entry.model });
       } catch (err) {
-        lastError = err;
-        console.error(
-          `[generate] ${provider.name} attempt ${attempt + 1} failed after ${Date.now() - callStart}ms:`,
-          err.name === 'TimeoutError' ? 'timed out' : err.message
-        );
-        if (err instanceof ProviderError) {
-          // Auth or bad-request errors won't fix themselves; move to the next provider.
-          if (!err.retryable || err.status === 429) break;
+        const took = Math.round((Date.now() - callStart) / 1000);
+        let kind = 'other';
+        let detail;
+        if (err?.name === 'TimeoutError') {
+          kind = 'timeout';
+          detail = `no reply after ${took}s`;
+        } else if (err instanceof ProviderError) {
+          kind = err.status === 429 ? 'quota' : err.status === 401 || err.status === 403 ? 'auth' : 'other';
+          detail = err.reason || err.message;
+        } else {
+          detail = `reply wasn’t a usable letter (${err.message})`;
         }
-        if (err?.name === 'TimeoutError') break;
+        failures.push({ provider: entry.label, model: entry.model, kind, detail });
+        console.error(`[generate] ${entry.name} ${entry.model} attempt ${attempt + 1} failed after ${took}s: ${detail}`);
+
+        if (kind === 'timeout' || kind === 'auth') {
+          // A slow or rejected provider will be the same on its other models.
+          skipProvider.add(entry.name);
+          break;
+        }
+        if (err instanceof ProviderError && (!err.retryable || err.status === 429)) break; // try the next model
       }
     }
   }
 
-  if (lastError instanceof ProviderError && lastError.status === 429) {
-    return errorResponse('The free AI quota is used up for the moment. Wait a minute and try again.', 429);
+  const details = failures.map((f) => `${f.provider} (${f.model}): ${f.detail}`).slice(-6);
+  const kinds = new Set(failures.map((f) => f.kind));
+
+  if (failures.length && kinds.size === 1 && kinds.has('quota')) {
+    return errorResponse('The free AI quota is used up for the moment. Wait a minute and try again.', 429, { details });
   }
-  if (lastError instanceof ProviderError && (lastError.status === 401 || lastError.status === 403)) {
-    return errorResponse('The AI key was rejected. Check GEMINI_API_KEY or GROQ_API_KEY in your environment variables.', 502);
+  if (failures.length && kinds.size === 1 && kinds.has('auth')) {
+    return errorResponse(
+      'The AI keys were rejected. Check GEMINI_API_KEY and GROQ_API_KEY in your environment variables, then redeploy.',
+      502,
+      { details }
+    );
   }
-  if (lastError?.name === 'TimeoutError') {
-    return errorResponse('The AI took too long to respond. Try again.', 504);
+  if (failures.length && kinds.size === 1 && kinds.has('timeout')) {
+    return errorResponse('The AI took too long to respond. Try again.', 504, { details });
   }
-  return errorResponse('The letter couldn’t be written this time. Try again.', 502);
+  return errorResponse('The letter couldn’t be written this time. The details below say why.', 502, { details });
 }
