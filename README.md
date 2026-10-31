@@ -35,9 +35,9 @@ Built with Next.js 15 (App Router), Tailwind CSS, Lucide icons, pdfjs-dist (CV r
 | `GEMINI_MODEL` | No | `gemini-3.8-flash` |
 | `GEMINI_THINKING_LEVEL` | No | `low` (fastest; `medium` and `high` are slower and can hit the 60-second limit) |
 | `GROQ_API_KEY` | One of the two keys | none |
-| `GROQ_MODEL` | No | `llama-3.3-70b-versatile` |
+| `GROQ_MODEL` | No | `openai/gpt-oss-120b` (Groq retired its Llama models for free accounts in August 2026) |
 
-Model names change over time. If generation starts failing with a 404 in the server logs, set `GEMINI_MODEL` to a current Flash model from Google's model list.
+Model names change over time. The app tries several models in turn (Gemini 3.8 Flash, then Groq gpt-oss-120b and gpt-oss-20b, then Gemini 3.6 Flash and 3.1 Flash-Lite) and checks which Groq models your key can use. If every model fails, the error message lists each one's reason under **Technical details**.
 
 ## How it works
 

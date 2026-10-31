@@ -4,6 +4,9 @@ import { useEffect, useId, useLayoutEffect, useRef, useState } from 'react';
 import {
   AlertCircle,
   Check,
+  CircleCheck,
+  CircleDashed,
+  CircleX,
   Copy,
   Download,
   FileUp,
@@ -25,8 +28,10 @@ import {
   referenceStyle as buildReferenceStyle,
 } from '@/lib/pdfExporter';
 import { readPdf } from '@/lib/pdfText';
+import { BULLET, normaliseParagraph } from '@/lib/letterFormat';
 
 const QUICK_TWEAKS = [
+  'Use bullet points for my key strengths',
   'Make it more enthusiastic',
   'Shorten to 250 words',
   'Emphasise leadership',
@@ -44,14 +49,23 @@ const useIsoLayoutEffect = typeof window === 'undefined' ? useEffect : useLayout
 
 /* --------------------------------- Editable --------------------------------- */
 
-function Editable({ value, onCommit, multiline, placeholder, label, style, className }) {
+const escapeHtml = (t) => t.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
+
+function Editable({ value, onCommit, multiline, placeholder, label, style, className, boldLead = 0 }) {
   const ref = useRef(null);
 
   // Only push outside changes into the DOM when the field isn't being typed in.
   useIsoLayoutEffect(() => {
     const el = ref.current;
-    if (el && document.activeElement !== el && el.innerText !== value) el.innerText = value;
-  }, [value]);
+    if (!el || document.activeElement === el) return;
+    if (boldLead) {
+      // Bold "Keyword:" lead, matching the PDF. innerText still reads back as plain text.
+      const html = `<strong>${escapeHtml(value.slice(0, boldLead))}</strong>${escapeHtml(value.slice(boldLead))}`;
+      if (el.innerHTML !== html) el.innerHTML = html;
+    } else if (el.innerText !== value) {
+      el.innerText = value;
+    }
+  }, [value, boldLead]);
 
   return (
     <div
@@ -117,9 +131,21 @@ function LetterSheet({ letter, style, onLetterChange, revealKey, writing }) {
 
   function commit(block, text) {
     const next = { ...letter };
-    if (block.field === 'paragraphs') {
+    if (block.field === 'paragraphs' && block.line !== undefined) {
+      // One line of a bullet list: edit or remove just that line.
       const paragraphs = [...letter.paragraphs];
-      const parts = text.split(/\n\s*\n/).map((p) => p.replace(/\s*\n\s*/g, ' ').trim()).filter(Boolean);
+      const lines = paragraphs[block.index].split('\n');
+      const clean = text.replace(/\s*\n\s*/g, ' ').trim();
+      if (clean) lines[block.line] = block.bullet ? BULLET + clean : clean;
+      else lines.splice(block.line, 1);
+      const joined = lines.join('\n');
+      if (joined.trim()) paragraphs[block.index] = joined;
+      else paragraphs.splice(block.index, 1);
+      next.paragraphs = paragraphs;
+    } else if (block.field === 'paragraphs') {
+      // Blank lines split a paragraph in two; lines typed with "- " become bullets.
+      const paragraphs = [...letter.paragraphs];
+      const parts = text.split(/\n\s*\n/).map(normaliseParagraph).filter(Boolean);
       paragraphs.splice(block.index, 1, ...parts);
       next.paragraphs = paragraphs;
     } else if (block.field === 'recipientLines') {
@@ -155,14 +181,21 @@ function LetterSheet({ letter, style, onLetterChange, revealKey, writing }) {
                 />
               );
             }
-            return (
+            const label =
+              block.field !== 'paragraphs'
+                ? block.placeholder
+                : block.bullet
+                  ? `Paragraph ${block.index + 1}, bullet ${block.line}`
+                  : `Paragraph ${block.index + 1}`;
+            const editable = (
               <Editable
-                key={`${block.field}-${block.index ?? ''}-${i}`}
+                key={`${block.field}-${block.index ?? ''}-${block.line ?? ''}-${i}`}
                 value={block.text}
+                boldLead={block.boldLead || 0}
                 placeholder={block.placeholder}
-                label={block.field === 'paragraphs' ? `Paragraph ${block.index + 1}` : block.placeholder}
+                label={label}
                 multiline={block.multiline}
-                className={revealKey ? 'ink-in' : ''}
+                className={revealKey && !block.bullet ? 'ink-in' : ''}
                 onCommit={(text) => commit(block, text)}
                 style={{
                   '--i': i,
@@ -171,10 +204,27 @@ function LetterSheet({ letter, style, onLetterChange, revealKey, writing }) {
                   fontWeight: block.bold ? 700 : 400,
                   color: block.color,
                   textAlign: block.align,
-                  marginTop: pt(block.spaceBefore),
+                  marginTop: block.bullet ? 0 : pt(block.spaceBefore),
                   whiteSpace: 'pre-wrap',
                 }}
               />
+            );
+            if (!block.bullet) return editable;
+            return (
+              <div
+                key={`bullet-${block.index}-${block.line}-${i}`}
+                className={`relative ${revealKey ? 'ink-in' : ''}`}
+                style={{ '--i': i, marginTop: pt(block.spaceBefore), paddingLeft: pt(block.indent) }}
+              >
+                <span
+                  aria-hidden
+                  className="absolute top-0 select-none"
+                  style={{ left: pt(block.bulletX), fontSize: pt(block.size), lineHeight: block.lineHeight, color: block.color }}
+                >
+                  •
+                </span>
+                {editable}
+              </div>
             );
           })}
         </div>
@@ -184,6 +234,88 @@ function LetterSheet({ letter, style, onLetterChange, revealKey, writing }) {
 }
 
 /* --------------------------------- Console --------------------------------- */
+
+const FIT_TONE = {
+  strong: { chip: 'bg-royal text-white', bar: 'bg-royal' },
+  good: { chip: 'bg-ink text-white', bar: 'bg-ink' },
+  partial: { chip: 'bg-marker text-ink', bar: 'bg-marker' },
+  stretch: { chip: 'bg-stamp text-ink', bar: 'bg-stamp' },
+};
+
+const STATUS_ICON = {
+  strong: { Icon: CircleCheck, className: 'text-royal', label: 'Clear evidence' },
+  partial: { Icon: CircleDashed, className: 'text-ink/70', label: 'Partly shown' },
+  missing: { Icon: CircleX, className: 'text-stamp', label: 'Not in your CV' },
+};
+
+function FitSummary({ fit, requirements }) {
+  const tone = FIT_TONE[fit.level] || FIT_TONE.good;
+  const order = { strong: 0, partial: 1, missing: 2 };
+  const sorted = [...requirements].sort(
+    (a, b) => order[a.status] - order[b.status] || (a.importance === 'essential' ? -1 : 1)
+  );
+  return (
+    <div className="mt-3">
+      <div className="rounded-lg border-2 border-ink bg-envelope p-3">
+        <div className="flex items-end justify-between gap-3">
+          <div>
+            <p className="text-sm font-semibold text-ink/70">Match with this job</p>
+            <p className="mt-1 text-[34px] font-black leading-none tabular-nums tracking-tight">
+              {fit.score}
+              <span className="text-base font-bold text-ink/50">/100</span>
+            </p>
+          </div>
+          <span className={`rounded-full border-2 border-ink px-2.5 py-1 text-sm font-bold ${tone.chip}`}>{fit.label}</span>
+        </div>
+        <div
+          className="mt-2.5 h-3 overflow-hidden rounded-full border-2 border-ink bg-white"
+          role="meter"
+          aria-label="Match score"
+          aria-valuemin={0}
+          aria-valuemax={100}
+          aria-valuenow={fit.score}
+        >
+          <div className={`h-full ${tone.bar}`} style={{ width: `${Math.max(fit.score, 3)}%` }} />
+        </div>
+        {fit.essentialsTotal > 0 && (
+          <p className="mt-2 text-sm font-semibold">
+            {fit.essentialsMet} of {fit.essentialsTotal} essential requirements clearly met
+          </p>
+        )}
+        {fit.assessment && <p className="mt-1.5 text-sm leading-snug">{fit.assessment}</p>}
+      </div>
+
+      <ul className="mt-3 space-y-2.5">
+        {sorted.map((r, i) => {
+          const { Icon, className, label } = STATUS_ICON[r.status] || STATUS_ICON.partial;
+          return (
+            <li key={i} className="flex gap-2 text-sm leading-snug">
+              <Icon size={18} className={`mt-px shrink-0 ${className}`} aria-label={label} />
+              <span>
+                <span className="font-semibold">{r.requirement}</span>
+                {r.importance === 'essential' && <span className="ml-1.5 text-xs font-semibold text-ink/55">Essential</span>}
+                {r.evidence ? (
+                  <span className="block text-ink/70">{r.evidence}</span>
+                ) : (
+                  r.status === 'missing' && <span className="block text-ink/70">Not shown in your CV</span>
+                )}
+              </span>
+            </li>
+          );
+        })}
+      </ul>
+      {requirements.some((r) => r.status === 'missing') && (
+        <p className="mt-2.5 text-sm text-ink/65">
+          If you do have this experience, add it to your notes and write a fresh draft.
+        </p>
+      )}
+      <p className="mt-2 text-xs text-ink/55">
+        Scored from how well your CV covers this job’s main requirements. Essentials count double and partial evidence
+        counts half. It’s a guide to the letter’s strength, not a prediction of the outcome.
+      </p>
+    </div>
+  );
+}
 
 function Message({ message, onRetry, busy }) {
   if (message.role === 'user') {
@@ -224,7 +356,8 @@ function Message({ message, onRetry, busy }) {
   return (
     <li className="mr-4 rounded-xl rounded-bl-sm border-2 border-ink bg-white px-3.5 py-3 text-[15px]">
       <p>{message.text}</p>
-      {message.matches?.length > 0 && (
+      {message.fit && <FitSummary fit={message.fit} requirements={message.requirements || []} />}
+      {!message.fit && message.matches?.length > 0 && (
         <div className="mt-3">
           <p className="font-bold">Where your CV meets the job</p>
           <ul className="mt-1.5 space-y-2">
@@ -237,7 +370,7 @@ function Message({ message, onRetry, busy }) {
           </ul>
         </div>
       )}
-      {message.gaps?.length > 0 && (
+      {!message.fit && message.gaps?.length > 0 && (
         <div className="mt-3">
           <p className="font-bold">Asked for, but not in your CV</p>
           <ul className="mt-1.5 space-y-1">

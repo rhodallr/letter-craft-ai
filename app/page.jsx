@@ -156,8 +156,8 @@ export default function Home() {
       setMessages((prev) => [
         ...prev,
         msg('assistant', data.changes || 'Here’s your first draft, matched to the job.', {
-          matches: data.matches,
-          gaps: data.gaps,
+          fit: data.fit,
+          requirements: data.requirements,
         }),
       ]);
     } catch (err) {
@@ -176,8 +176,12 @@ export default function Home() {
     try {
       const { date, ...current } = letter;
       const data = await callApi({ mode: 'refine', cvText: cv.text, notes, jobText, letter: current, instruction, history });
-      pushVersion({ ...data.letter, date: date || today() });
-      setMessages((prev) => [...prev, msg('assistant', data.changes || 'Done. The page shows the new version.')]);
+      // Only add a draft when the letter actually changed.
+      if (!data.unchanged) pushVersion({ ...data.letter, date: date || today() });
+      setMessages((prev) => [
+        ...prev,
+        msg('assistant', data.changes || (data.unchanged ? 'The letter is unchanged.' : 'Done. The page shows the new version.')),
+      ]);
     } catch (err) {
       setMessages((prev) => [...prev, msg('error', err.message, { details: err.details })]);
     } finally {
